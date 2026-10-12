@@ -1,0 +1,41 @@
+name: Conversion bug
+description: An input that converts wrongly, or an error or panic
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Remove anything you are not allowed to share from the input before posting.
+  - type: dropdown
+    id: direction
+    attributes:
+      label: Direction
+      options: [Markdown to ADF (FromMarkdown), ADF to Markdown (ToMarkdown)]
+    validations:
+      required: true
+  - type: textarea
+    id: input
+    attributes:
+      label: Input
+      description: The smallest Markdown or ADF JSON that shows the problem.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: got
+    attributes:
+      label: What you got
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: go-adf version
+    validations:
+      required: true

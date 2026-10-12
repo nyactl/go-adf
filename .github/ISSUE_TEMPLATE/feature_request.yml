@@ -1,0 +1,11 @@
+name: Feature request
+description: A node type, option or behaviour you need
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What do you need, and why?
+      description: For a node or mark type, an example of the ADF and the Markdown you would expect.
+    validations:
+      required: true
