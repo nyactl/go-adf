@@ -174,11 +174,6 @@ func splitSpace(s string) (lead, core, trail string) {
 	return lead, trimmed, trail
 }
 
-func startsWithSpace(s string) bool {
-	r, _ := utf8.DecodeRuneInString(s)
-	return unicode.IsSpace(r)
-}
-
 // atEdge reports whether the rune at l[i:i+size] has whitespace or nothing
 // on one side, where it could join a neighbouring delimiter run.
 func atEdge(l string, i, size int) bool {
