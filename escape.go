@@ -80,6 +80,11 @@ func escapeLine(l string) string {
 			if i+1 < len(l) && l[i+1] == '[' {
 				b.WriteByte('\\')
 			}
+		case '{':
+			// A color delimiter of WithExtendedSyntax.
+			if loc := colorTokenRe.FindStringIndex(l[i:]); loc != nil && loc[0] == 0 {
+				b.WriteByte('\\')
+			}
 		}
 		b.WriteString(l[i : i+size])
 		i += size

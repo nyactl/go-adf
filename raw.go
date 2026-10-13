@@ -47,6 +47,8 @@ func plainBlock(n Node) bool {
 		}
 		return len(n.Marks) == 0
 	case "codeBlock":
+		// Code in the language columns is plain without
+		// WithExtendedSyntax only; renderer.plainBlock checks that.
 		lang := strings.Fields(strAttr(n.Attrs, "language"))
 		return len(lang) == 0 || lang[0] != rawInfo
 	case "table":
@@ -83,18 +85,22 @@ func plainTable(n Node) bool {
 	return true
 }
 
-// plainInline reports whether an inline node has a Markdown form.
-func plainInline(n Node) bool {
+// plainInline reports whether an inline node has a Markdown form; ext adds
+// the forms of WithExtendedSyntax.
+func plainInline(n Node, ext bool) bool {
 	switch n.Type {
 	case "text":
 		for _, m := range n.Marks {
-			if !plainMarks[m.Type] {
+			colored := ext && colorMark(m) && !hasMark(n.Marks, "code")
+			if !plainMarks[m.Type] && !colored {
 				return false
 			}
 		}
 		return !hasMark(n.Marks, "code") || !strings.HasPrefix(n.Text, rawPrefix)
 	case "hardBreak", "mention":
 		return true
+	case "inlineCard":
+		return ext && cardNode(n, "card:", "url")
 	}
 	return false
 }
@@ -132,8 +138,8 @@ func rawSpan(nodes []Node) string {
 // spanMember reports whether an inline node goes into a raw span next to
 // it: one without a Markdown form, or inline code, whose backticks would
 // join the span's.
-func spanMember(n Node) bool {
-	if !plainInline(n) {
+func spanMember(n Node, ext bool) bool {
+	if !plainInline(n, ext) {
 		return true
 	}
 	_, isLink := linkOf(n)
