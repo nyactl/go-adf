@@ -58,10 +58,28 @@ doc, err := adf.FromMarkdown("Thanks @[Person A]!", adf.WithMentionResolver(func
 
 Without a resolver, `@[label]` stays plain text. When the resolver does not know a label, `FromMarkdown` returns a `*MentionError`.
 
+### Keeping what Markdown cannot express
+
+Confluence pages hold app macros, panels, layouts, status lozenges and colored text, none of which Markdown has. By default `ToMarkdown` writes their text content, so a page read, edited and written back loses them. With `WithPassthrough`, both directions keep them exactly:
+
+````markdown
+Release state: `adf:{"type":"status","attrs":{"color":"green","text":"DONE"}}`
+
+```adf
+{"type":"extension","attrs":{"extensionType":"com.atlassian.confluence.macro.core","extensionKey":"toc"}}
+```
+````
+
+- A block without a Markdown form becomes a fenced code block with the info string `adf` holding the node's JSON; inline nodes and text with formatting Markdown lacks become inline code starting with `adf:`, several side by side in one JSON array.
+- `FromMarkdown` turns them back into the same nodes, numbers included, and fails with `ErrRawNode` when one is not a single valid node for its place. Without the option they stay code.
+- Attributes of nodes that do have a Markdown form, such as table widths or the local IDs Confluence gives paragraphs, are not kept.
+
+The option lets the author of the Markdown write any node. Applications that take Markdown from others, such as an assistant, should check the nodes it produced, for example that each was already in the stored document.
+
 ## How it is tested
 
 - Every document produced in the tests is validated against Atlassian's ADF JSON schema (`testdata/schema`), and a test makes sure that check can fail.
-- Four fuzz targets run in CI: Markdown always converts to valid ADF; ADF never makes `ToMarkdown` panic; Markdown is stable after one round trip; and randomly generated ADF, with the formatting combinations Jira writes, is stable as well. Every input fuzzing has ever found is kept in `testdata/fuzz` and runs with the normal tests.
+- Six fuzz targets run in CI: Markdown always converts to valid ADF; ADF never makes `ToMarkdown` panic; Markdown is stable after one round trip; randomly generated ADF, with the formatting combinations Jira writes, is stable as well; and with `WithPassthrough`, generated ADF keeps every node without a Markdown form exactly, while any Markdown converts, fails only with `ErrRawNode` or `ErrTooDeep`, and is stable. Every input fuzzing has ever found is kept in `testdata/fuzz` and runs with the normal tests.
 - A coverage test fails when Atlassian's schema gains a type that [COVERAGE.md](COVERAGE.md) does not describe.
 
 ## Versioning

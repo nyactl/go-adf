@@ -39,6 +39,10 @@ const DefaultMaxDepth = 100
 // ErrTooDeep is returned for documents nested deeper than the limit.
 var ErrTooDeep = errors.New("adf: document is nested too deeply")
 
+// ErrRawNode is returned by FromMarkdown, with WithPassthrough, for an adf
+// block or span that does not hold one valid node for its place.
+var ErrRawNode = errors.New("adf: invalid adf block")
+
 // MentionError is returned by FromMarkdown when the mention resolver does not
 // know a @[label].
 type MentionError struct {
@@ -57,6 +61,7 @@ type config struct {
 	mentionText    func(accountID, text string) string
 	resolveMention func(label string) (accountID, text string, ok bool)
 	maxDepth       int
+	passthrough    bool
 }
 
 func newConfig(opts []Option) *config {
@@ -80,6 +85,24 @@ func WithMentionText(f func(accountID, text string) string) Option {
 // @[label] stays plain text.
 func WithMentionResolver(f func(label string) (accountID, text string, ok bool)) Option {
 	return func(c *config) { c.resolveMention = f }
+}
+
+// WithPassthrough keeps what Markdown cannot express, so that
+// FromMarkdown(ToMarkdown(doc)) keeps it unchanged. ToMarkdown writes such a
+// block node, for example an app macro (extension, bodiedExtension), a panel
+// or a table with merged cells, as a fenced code block with the info string
+// adf holding the node's JSON. Such an inline node, for example a status or
+// an inlineExtension, and text with formatting other than links, emphasis,
+// strikethrough and code, become inline code holding adf: and the JSON.
+// FromMarkdown turns both forms back into the node, after checking that it
+// is one JSON object with a type that fits its place, and fails with
+// ErrRawNode otherwise. Attributes of nodes that do have a Markdown form,
+// such as table widths, are still not kept.
+//
+// Callers that take Markdown from others decide which of these nodes they
+// accept: the option lets the author write any node.
+func WithPassthrough() Option {
+	return func(c *config) { c.passthrough = true }
 }
 
 // WithMaxDepth sets the nesting limit for both directions.

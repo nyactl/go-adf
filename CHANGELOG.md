@@ -4,6 +4,14 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## Unreleased
 
+### Added
+
+- `WithPassthrough` keeps what Markdown cannot express, such as app macros (`extension`, `bodiedExtension`, `inlineExtension`), panels, layouts, status lozenges and colored text: `ToMarkdown` writes them as their JSON in fenced `adf` blocks and `adf:` inline code, and `FromMarkdown` reads them back unchanged, failing with the new `ErrRawNode` for invalid ones.
+
+### Changed
+
+- `ToMarkdown` reads numbers in attributes exactly, so large numbers are no longer rounded.
+
 ## [0.1.0] - 2026-10-12
 
 ### Added

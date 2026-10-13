@@ -82,12 +82,20 @@ func set(types ...string) map[string]bool {
 func (c *converter) children(n ast.Node, allowed map[string]bool) []Node {
 	var out []Node
 	for ch := n.FirstChild(); ch != nil; ch = ch.NextSibling() {
-		out = append(out, c.block(ch)...)
-	}
-	if allowed != nil {
-		out = fit(out, allowed)
+		nodes := c.block(ch)
+		// A passed-through node is kept where its author put it.
+		if allowed != nil && !c.isRaw(ch) {
+			nodes = fit(nodes, allowed)
+		}
+		out = append(out, nodes...)
 	}
 	return out
+}
+
+// isRaw reports whether n is an adf block read with WithPassthrough.
+func (c *converter) isRaw(n ast.Node) bool {
+	f, ok := n.(*ast.FencedCodeBlock)
+	return ok && c.cfg.passthrough && string(f.Language(c.src)) == rawInfo
 }
 
 func (c *converter) block(n ast.Node) []Node {
@@ -99,6 +107,14 @@ func (c *converter) block(n ast.Node) []Node {
 	case *ast.ThematicBreak:
 		return []Node{{Type: "rule"}}
 	case *ast.FencedCodeBlock:
+		if c.isRaw(n) {
+			node, err := parseRaw(c.lines(n), false)
+			if err != nil {
+				c.fail(err)
+				return nil
+			}
+			return []Node{node}
+		}
 		node := codeBlock(c.lines(n))
 		if lang := string(n.Language(c.src)); lang != "" {
 			node.Attrs = map[string]any{"language": lang}
@@ -122,7 +138,7 @@ func (c *converter) block(n ast.Node) []Node {
 			content := c.children(item, listItemChildren)
 			// A list item starts with a paragraph or code block in Jira's
 			// editor, even though the JSON schema does not say so.
-			if len(content) == 0 || (content[0].Type != "paragraph" && content[0].Type != "codeBlock") {
+			if len(content) == 0 || (content[0].Type != "paragraph" && content[0].Type != "codeBlock" && !c.isRaw(item.FirstChild())) {
 				content = append([]Node{{Type: "paragraph"}}, content...)
 			}
 			list.Content = append(list.Content, Node{Type: "listItem", Content: content})
@@ -243,6 +259,15 @@ func (c *converter) inlines(parent ast.Node, marks []Mark) []Node {
 				}
 			}
 			code := strings.ReplaceAll(b.String(), "\n", " ")
+			if c.cfg.passthrough && strings.HasPrefix(code, rawPrefix) {
+				nodes, err := parseSpan(code[len(rawPrefix):])
+				if err != nil {
+					c.fail(err)
+					continue
+				}
+				out = append(out, nodes...)
+				continue
+			}
 			if strings.TrimSpace(code) == "" {
 				out = append(out, textNodes(code, marks)...)
 				continue
@@ -299,6 +324,12 @@ func (c *converter) inlines(parent ast.Node, marks []Mark) []Node {
 	return out
 }
 
+func (c *converter) fail(err error) {
+	if c.err == nil {
+		c.err = err
+	}
+}
+
 // mentions splits @[label] out of text without inline code into mention
 // nodes, when a resolver is set.
 func (c *converter) mentions(nodes []Node) []Node {
@@ -307,7 +338,7 @@ func (c *converter) mentions(nodes []Node) []Node {
 	}
 	var out []Node
 	for _, n := range nodes {
-		if n.Type != "text" || hasMark(n.Marks, "code") || !strings.Contains(n.Text, "@[") {
+		if n.Type != "text" || hasMark(n.Marks, "code") || !plainInline(n) || !strings.Contains(n.Text, "@[") {
 			out = append(out, n)
 			continue
 		}
@@ -371,7 +402,8 @@ func textNodes(s string, marks []Mark) []Node {
 func mergeText(nodes []Node) []Node {
 	var out []Node
 	for _, n := range nodes {
-		if last := len(out) - 1; last >= 0 && n.Type == "text" && out[last].Type == "text" && reflect.DeepEqual(out[last].Marks, n.Marks) {
+		// Text that WithPassthrough writes as JSON stays as it came.
+		if last := len(out) - 1; last >= 0 && n.Type == "text" && out[last].Type == "text" && plainInline(n) && plainInline(out[last]) && reflect.DeepEqual(out[last].Marks, n.Marks) {
 			out[last].Text += n.Text
 			continue
 		}
