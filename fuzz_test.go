@@ -77,3 +77,38 @@ func FuzzToMarkdown(f *testing.F) {
 		_, _ = ToMarkdown(json.RawMessage(in))
 	})
 }
+
+// FuzzPassthroughMarkdown checks that, with WithPassthrough, any input
+// converts without panicking, fails only with ErrRawNode or ErrTooDeep, and
+// is stable after one round trip.
+func FuzzPassthroughMarkdown(f *testing.F) {
+	seedMarkdown(f)
+	f.Add("```adf\n{\"type\":\"rule\"}\n```")
+	f.Add("a `adf:[{\"type\":\"status\",\"attrs\":{\"text\":\"x\"}},{\"type\":\"text\",\"text\":\"c\",\"marks\":[{\"type\":\"code\"}]}]` b")
+	f.Add("- ```adf\n  {\"type\":\"panel\",\"content\":[]}\n  ```")
+	f.Add("| a |\n| --- |\n| `adf:{\"type\":\"emoji\",\"attrs\":{\"shortName\":\"\\|\"}}` |")
+	f.Fuzz(func(t *testing.T, in string) {
+		doc, err := FromMarkdown(in, WithPassthrough())
+		if errors.Is(err, ErrRawNode) || errors.Is(err, ErrTooDeep) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("FromMarkdown(%q): %v", in, err)
+		}
+		md1, err := ToMarkdown(doc, WithPassthrough())
+		if err != nil {
+			t.Fatalf("ToMarkdown of our own output: %v\n%s", err, doc)
+		}
+		doc2, err := FromMarkdown(md1, WithPassthrough())
+		if err != nil {
+			t.Fatalf("reading back %q: %v\nfrom %s", md1, err, doc)
+		}
+		md2, err := ToMarkdown(doc2, WithPassthrough())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if md1 != md2 {
+			t.Fatalf("not stable after one round trip\ninput: %q\nfirst: %q\nsecond: %q", in, md1, md2)
+		}
+	})
+}

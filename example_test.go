@@ -58,3 +58,22 @@ func Example_mentions() {
 	// Output:
 	// Thanks @[Person A]!
 }
+
+func Example_passthrough() {
+	page := `{"type":"doc","version":1,"content":[
+		{"type":"paragraph","content":[{"type":"text","text":"Contents:"}]},
+		{"type":"extension","attrs":{"extensionType":"com.atlassian.confluence.macro.core","extensionKey":"toc"}}]}`
+	md, _ := adf.ToMarkdown(json.RawMessage(page), adf.WithPassthrough())
+	fmt.Println(md)
+
+	edited := strings.Replace(md, "Contents:", "On this page:", 1)
+	doc, _ := adf.FromMarkdown(edited, adf.WithPassthrough())
+	fmt.Println(string(doc))
+	// Output:
+	// Contents:
+	//
+	// ```adf
+	// {"type":"extension","attrs":{"extensionKey":"toc","extensionType":"com.atlassian.confluence.macro.core"}}
+	// ```
+	// {"type":"doc","version":1,"content":[{"type":"paragraph","content":[{"type":"text","text":"On this page:"}]},{"type":"extension","attrs":{"extensionKey":"toc","extensionType":"com.atlassian.confluence.macro.core"}}]}
+}

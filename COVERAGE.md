@@ -4,6 +4,8 @@ How each node and mark type of the [ADF JSON schema](testdata/schema/README.md) 
 
 **ToMarkdown** is the ADF → Markdown direction, **FromMarkdown** the Markdown → ADF direction. "Text kept" means the type has no Markdown form, but its text content is written, so nothing a reader needs is lost.
 
+With `WithPassthrough`, every node and mark without a Markdown form below (marked – in the FromMarkdown column, or written in another form) is instead written as its JSON and read back unchanged; see the README.
+
 ## Nodes
 
 | Type | ToMarkdown | FromMarkdown |

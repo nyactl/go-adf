@@ -29,8 +29,12 @@ func ToMarkdown(raw json.RawMessage, opts ...Option) (string, error) {
 		}
 		return str, nil
 	}
+	// Numbers keep their exact text, so that passed-through nodes are
+	// written as they came.
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
 	var doc Node
-	if err := json.Unmarshal(raw, &doc); err != nil {
+	if err := dec.Decode(&doc); err != nil {
 		return "", fmt.Errorf("adf: invalid document: %w", err)
 	}
 	if tooDeep(doc, cfg.maxDepth) {
@@ -40,7 +44,7 @@ func ToMarkdown(raw json.RawMessage, opts ...Option) (string, error) {
 	if mention == nil {
 		mention = func(_, text string) string { return strings.TrimPrefix(text, "@") }
 	}
-	r := renderer{mention: mention}
+	r := renderer{mention: mention, raw: cfg.passthrough}
 	return strings.TrimSpace(r.blocks(doc.Content)), nil
 }
 
@@ -52,13 +56,24 @@ type renderer struct {
 	altList bool
 	// noVerify skips the self-check in inline, which itself renders.
 	noVerify bool
+	// raw writes what Markdown cannot express as JSON (WithPassthrough).
+	raw bool
+	// allowed are the block types the container accepts when reading back;
+	// nil means any.
+	allowed map[string]bool
 }
 
 func (r renderer) blocks(nodes []Node) string {
 	parts := make([]string, 0, len(nodes))
 	prev, prevAlt := "", false
 	for _, n := range nodes {
+		if r.raw && (!plainBlock(n) || (r.allowed != nil && !r.allowed[n.Type])) {
+			parts = append(parts, rawBlock(n))
+			prev, prevAlt = n.Type, false
+			continue
+		}
 		rr := r
+		rr.allowed = nil
 		isList := n.Type == "bulletList" || n.Type == "orderedList"
 		rr.altList = isList && n.Type == prev && !prevAlt
 		if s := rr.block(n); strings.TrimSpace(s) != "" {
@@ -130,6 +145,10 @@ func (r renderer) block(n Node) string {
 		}
 		return fence + info + "\n" + code + "\n" + fence
 	case "blockquote":
+		if r.raw {
+			r.allowed = blockquoteChildren
+			return quote(r.blocks(n.Content))
+		}
 		return quote(r.blocks(fitMarkdown(n.Content, blockquoteChildren)))
 	case "panel":
 		label := strAttr(n.Attrs, "panelType")
@@ -183,7 +202,14 @@ func (r renderer) list(items []Node, marker func(int) string) string {
 			lines = append(lines, marker(i)+r.block(item))
 			continue
 		}
-		body := r.blocks(fitMarkdown(item.Content, listItemChildren))
+		var body string
+		if r.raw {
+			rr := r
+			rr.allowed = listItemChildren
+			body = rr.blocks(item.Content)
+		} else {
+			body = r.blocks(fitMarkdown(item.Content, listItemChildren))
+		}
 		// Markdown cannot hold an empty item stably: depending on what
 		// follows, it ends the list.
 		if strings.TrimSpace(body) == "" {
@@ -252,10 +278,10 @@ func (r renderer) table(n Node) string {
 // left out rather than written in a way that reads back differently.
 func (r renderer) inline(nodes []Node) string {
 	s := r.writeInline(nodes)
-	if r.noVerify || !hasEmphasis(nodes) || stable(s) {
+	if r.noVerify || !hasEmphasis(nodes) || stable(s, r.raw) {
 		return s
 	}
-	return r.writeInline(withoutEmphasis(nodes))
+	return r.writeInline(withoutEmphasis(nodes, r.raw))
 }
 
 func hasEmphasis(nodes []Node) bool {
@@ -269,9 +295,14 @@ func hasEmphasis(nodes []Node) bool {
 	return false
 }
 
-func withoutEmphasis(nodes []Node) []Node {
+// withoutEmphasis drops emphasis, except from nodes written as JSON (raw).
+func withoutEmphasis(nodes []Node, raw bool) []Node {
 	out := make([]Node, len(nodes))
 	for i, n := range nodes {
+		if raw && !plainInline(n) {
+			out[i] = n
+			continue
+		}
 		var marks []Mark
 		for _, m := range n.Marks {
 			if m.Type != "em" && m.Type != "strong" && m.Type != "strike" {
@@ -285,8 +316,12 @@ func withoutEmphasis(nodes []Node) []Node {
 }
 
 // stable reports whether s reads back as itself.
-func stable(s string) bool {
-	doc, err := FromMarkdown(s)
+func stable(s string, raw bool) bool {
+	var opts []Option
+	if raw {
+		opts = append(opts, WithPassthrough())
+	}
+	doc, err := FromMarkdown(s, opts...)
 	if err != nil {
 		return false
 	}
@@ -294,7 +329,7 @@ func stable(s string) bool {
 	if err := json.Unmarshal(doc, &root); err != nil {
 		return false
 	}
-	r := renderer{mention: func(_, text string) string { return text }, noVerify: true}
+	r := renderer{mention: func(_, text string) string { return text }, noVerify: true, raw: raw}
 	return strings.TrimSpace(r.blocks(root.Content)) == s
 }
 
@@ -303,11 +338,26 @@ func (r renderer) writeInline(nodes []Node) string {
 	w := &inlineWriter{atStart: true}
 	for i := 0; i < len(nodes); i++ {
 		n := nodes[i]
-		if href, ok := linkOf(n); ok {
+		if r.raw && spanMember(n) {
+			j, hasRaw := i, false
+			for ; j < len(nodes) && spanMember(nodes[j]); j++ {
+				hasRaw = hasRaw || !plainInline(nodes[j])
+			}
+			if hasRaw {
+				span := rawSpan(nodes[i:j])
+				if r.inTable {
+					span = strings.ReplaceAll(span, "|", `\|`)
+				}
+				w.leaf(span)
+				i = j - 1
+				continue
+			}
+		}
+		if href, ok := r.linkOf(n); ok {
 			// Consecutive text with the same target is one link.
 			j := i + 1
 			for j < len(nodes) {
-				if h, ok := linkOf(nodes[j]); !ok || h != href {
+				if h, ok := r.linkOf(nodes[j]); !ok || h != href {
 					break
 				}
 				j++
@@ -365,6 +415,7 @@ func (r renderer) normalizeInline(nodes []Node) []Node {
 	var out []Node
 	for _, n := range nodes {
 		switch {
+		case r.raw && !plainInline(n) && (n.Type != "text" || n.Text != ""):
 		case n.Type == "text":
 			if n.Text == "" {
 				continue
@@ -383,14 +434,14 @@ func (r renderer) normalizeInline(nodes []Node) []Node {
 	}
 	// A link whose text is only whitespace cannot be written.
 	for i := 0; i < len(out); {
-		href, ok := linkOf(out[i])
+		href, ok := r.linkOf(out[i])
 		if !ok {
 			i++
 			continue
 		}
 		j, blank := i, true
 		for ; j < len(out); j++ {
-			if h, ok := linkOf(out[j]); !ok || h != href {
+			if h, ok := r.linkOf(out[j]); !ok || h != href {
 				break
 			}
 			blank = blank && strings.TrimSpace(out[j].Text) == ""
@@ -470,6 +521,15 @@ func runOf(next []Node, mark string) (run int, wordAfter bool) {
 		return run, false
 	}
 	return run, true
+}
+
+// linkOf is linkOf for what the renderer writes as Markdown: with raw, text
+// written as JSON keeps its link there.
+func (r renderer) linkOf(n Node) (string, bool) {
+	if r.raw && !plainInline(n) {
+		return "", false
+	}
+	return linkOf(n)
 }
 
 func linkOf(n Node) (string, bool) {
@@ -705,6 +765,13 @@ func intAttr(attrs map[string]any, key string, def int) int {
 	switch v := attrs[key].(type) {
 	case float64:
 		return int(v)
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			return int(i)
+		}
+		if f, err := v.Float64(); err == nil {
+			return int(f)
+		}
 	case string:
 		if i, err := strconv.Atoi(v); err == nil {
 			return i
@@ -720,6 +787,8 @@ func formatDate(v any) string {
 		ms, _ = strconv.ParseInt(t, 10, 64)
 	case float64:
 		ms = int64(t)
+	case json.Number:
+		ms, _ = t.Int64()
 	}
 	if ms == 0 {
 		return ""
