@@ -79,6 +79,7 @@ type config struct {
 	passthrough    bool
 	extended       bool
 	resolveMedia   func(name string) (media Node, ok bool)
+	rawNodes       RawNodes
 }
 
 func newConfig(opts []Option) *config {
@@ -120,6 +121,29 @@ func WithMentionResolver(f func(label string) (accountID, text string, ok bool))
 // accept: the option lets the author write any node.
 func WithPassthrough() Option {
 	return func(c *config) { c.passthrough = true }
+}
+
+// RawNodes decides, with WithRawNodes, what stands in the Markdown for the
+// nodes WithPassthrough writes as JSON. An application can write a
+// placeholder instead of a node whose content it does not want to show, and
+// put the node back when reading, or refuse nodes it did not write.
+type RawNodes interface {
+	// Write returns the node to write as JSON in place of n.
+	Write(n Node) Node
+	// Read returns the node to use for n, read from an adf block or, when
+	// inline is set, from adf inline code. An error makes FromMarkdown fail
+	// with it.
+	Read(n Node, inline bool) (Node, error)
+}
+
+// WithRawNodes turns on WithPassthrough and passes every node it writes or
+// reads as JSON through h. Inline code that a span of nodes takes along is
+// not passed.
+func WithRawNodes(h RawNodes) Option {
+	return func(c *config) {
+		c.passthrough = true
+		c.rawNodes = h
+	}
 }
 
 // WithExtendedSyntax adds Markdown forms for elements of the Confluence and

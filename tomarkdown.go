@@ -44,7 +44,7 @@ func ToMarkdown(raw json.RawMessage, opts ...Option) (string, error) {
 	if mention == nil {
 		mention = func(_, text string) string { return strings.TrimPrefix(text, "@") }
 	}
-	r := renderer{mention: mention, raw: cfg.passthrough, ext: cfg.extended, media: cfg.resolveMedia != nil}
+	r := renderer{mention: mention, raw: cfg.passthrough, ext: cfg.extended, media: cfg.resolveMedia != nil, hook: cfg.rawNodes}
 	return strings.TrimSpace(r.blocks(doc.Content)), nil
 }
 
@@ -63,6 +63,8 @@ type renderer struct {
 	allowed map[string]bool
 	// ext writes the forms of WithExtendedSyntax; media also attachments.
 	ext, media bool
+	// hook replaces what raw writes (WithRawNodes).
+	hook RawNodes
 	// nested is set below the top level of the document, inExpand inside
 	// an expand.
 	nested, inExpand bool
@@ -83,7 +85,7 @@ func (r renderer) blocks(nodes []Node) string {
 	prev, prevAlt := "", false
 	for _, n := range nodes {
 		if r.raw && (!r.plainBlock(n) || (r.allowed != nil && !r.allowed[n.Type])) {
-			parts = append(parts, rawBlock(n))
+			parts = append(parts, rawBlock(r.written(n)))
 			prev, prevAlt = n.Type, false
 			continue
 		}
@@ -365,13 +367,19 @@ func stable(s string, raw, ext bool) bool {
 }
 
 func (r renderer) writeInline(nodes []Node) string {
+	return r.writeInlineAt(nodes, true)
+}
+
+// writeInlineAt writes inline content that starts a line, or continues one
+// (lineStart false).
+func (r renderer) writeInlineAt(nodes []Node, lineStart bool) string {
 	nodes = r.normalizeInline(nodes)
 	if r.ext {
 		if s, ok := r.colored(nodes); ok {
 			return s
 		}
 	}
-	w := &inlineWriter{atStart: true}
+	w := &inlineWriter{atStart: lineStart, midLine: !lineStart, jsonNodes: r.raw, ext: r.ext}
 	for i := 0; i < len(nodes); i++ {
 		n := nodes[i]
 		if r.raw && spanMember(n, r.ext) {
@@ -380,7 +388,7 @@ func (r renderer) writeInline(nodes []Node) string {
 				hasRaw = hasRaw || !plainInline(nodes[j], r.ext)
 			}
 			if hasRaw {
-				span := rawSpan(nodes[i:j])
+				span := rawSpan(r.writtenSpan(nodes[i:j]))
 				if r.inTable {
 					span = strings.ReplaceAll(span, "|", `\|`)
 				}
@@ -535,10 +543,16 @@ func (r renderer) textInto(w *inlineWriter, n Node, next []Node) {
 // reports whether the content after that run starts with a letter or digit.
 // Whitespace-only pieces are skipped: the writer holds them back without
 // closing emphasis.
-func runOf(next []Node, mark string) (run int, wordAfter bool) {
+//
+// With raw, nodes written as JSON end the run, like other content that
+// emphasis delimiters do not touch.
+func (w *inlineWriter) runOf(next []Node, mark string) (run int, wordAfter bool) {
 	i, spaced := 0, false
 	for ; i < len(next); i++ {
 		m := next[i]
+		if w.jsonNodes && !plainInline(m, w.ext) {
+			return run, false
+		}
 		if m.Type == "text" && strings.TrimSpace(m.Text) == "" {
 			spaced = spaced || m.Text != ""
 			continue
@@ -560,6 +574,30 @@ func runOf(next []Node, mark string) (run int, wordAfter bool) {
 		return run, false
 	}
 	return run, true
+}
+
+// written is the node raw writes for n.
+func (r renderer) written(n Node) Node {
+	if r.hook == nil {
+		return n
+	}
+	return r.hook.Write(n)
+}
+
+// writtenSpan is written for the nodes of a span, except the inline code
+// it takes along.
+func (r renderer) writtenSpan(nodes []Node) []Node {
+	if r.hook == nil {
+		return nodes
+	}
+	out := make([]Node, len(nodes))
+	for i, n := range nodes {
+		out[i] = n
+		if !plainInline(n, r.ext) {
+			out[i] = r.hook.Write(n)
+		}
+	}
+	return out
 }
 
 // cardLink reports whether a link target would read as a card in an
@@ -594,7 +632,7 @@ func (r renderer) link(nodes []Node, href string) string {
 	if len(nodes) == 1 && len(nodes[0].Marks) == 1 && nodes[0].Text == href && isAutolink(href) && !cardLink(href) {
 		return "<" + href + ">"
 	}
-	w := &inlineWriter{}
+	w := &inlineWriter{jsonNodes: r.raw, ext: r.ext}
 	for i, n := range nodes {
 		r.textInto(w, n, nodes[i+1:])
 	}
@@ -623,6 +661,10 @@ type inlineWriter struct {
 	atStart bool
 	// closedStar is set right after a closing delimiter ending in *.
 	closedStar bool
+	// jsonNodes and ext are the renderer's raw and ext modes.
+	jsonNodes, ext bool
+	// midLine is set when the output continues a line.
+	midLine bool
 }
 
 type openMark struct {
@@ -701,8 +743,8 @@ func (w *inlineWriter) text(s string, marks []Mark, next []Node) {
 	// Emphasis that goes on longer is opened first, so it can stay open
 	// when the shorter one closes.
 	sort.SliceStable(opening, func(a, b int) bool {
-		ra, _ := runOf(next, emphasis[opening[a]].mark)
-		rb, _ := runOf(next, emphasis[opening[b]].mark)
+		ra, _ := w.runOf(next, emphasis[opening[a]].mark)
+		rb, _ := w.runOf(next, emphasis[opening[b]].mark)
 		return ra > rb
 	})
 	for _, i := range opening {
@@ -711,7 +753,7 @@ func (w *inlineWriter) text(s string, marks []Mark, next []Node) {
 		// run. Underscores avoid that, but cannot close in front of a
 		// letter or digit; then this emphasis is left out.
 		if strings.HasPrefix(delim, "*") && w.closedStar {
-			if _, wordAfter := runOf(next, emphasis[i].mark); wordAfter {
+			if _, wordAfter := w.runOf(next, emphasis[i].mark); wordAfter {
 				continue
 			}
 			delim = strings.Repeat("_", len(delim))
@@ -756,7 +798,16 @@ func (w *inlineWriter) lineBreak() {
 
 func (w *inlineWriter) finish() string {
 	w.closeTo(0)
-	return escapeLineStarts(strings.TrimRightFunc(string(w.b), unicode.IsSpace))
+	s := strings.TrimRightFunc(string(w.b), unicode.IsSpace)
+	if w.midLine {
+		// The first line continues one, and does not start a block.
+		first, rest, found := strings.Cut(s, "\n")
+		if !found {
+			return first
+		}
+		return first + "\n" + escapeLineStarts(rest)
+	}
+	return escapeLineStarts(s)
 }
 
 func quote(s string) string {

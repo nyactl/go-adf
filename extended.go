@@ -371,8 +371,13 @@ func (r renderer) colored(nodes []Node) (string, bool) {
 				run[k].Marks = marks
 			}
 		}
-		inner := r.writeInline(run)
 		space(lead)
+		atLineStart := b.Len() == 0 || strings.HasSuffix(b.String(), "\n")
+		if open != "" {
+			// After an opening delimiter, the text does not start a line.
+			atLineStart = false
+		}
+		inner := r.writeInlineAt(run, atLineStart)
 		if inner != "" {
 			b.WriteString(open + inner + closing)
 		}

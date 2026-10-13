@@ -105,7 +105,7 @@ Release state: `adf:{"type":"status","attrs":{"color":"green","text":"DONE"}}`
 - `FromMarkdown` turns them back into the same nodes, numbers included, and fails with `ErrRawNode` when one is not a single valid node for its place. Without the option they stay code.
 - Attributes of nodes that do have a Markdown form, such as table widths or the local IDs Confluence gives paragraphs, are not kept.
 
-The option lets the author of the Markdown write any node. Applications that take Markdown from others, such as an assistant, should check the nodes it produced, for example that each was already in the stored document.
+The option lets the author of the Markdown write any node. Applications that take Markdown from others, such as an assistant, can pass `WithRawNodes` instead: its `Write` decides what is written in place of each such node, for example a placeholder that keeps the node's content out of the Markdown, and its `Read` turns what comes back into the node to use, or refuses it.
 
 ## How it is tested
 
