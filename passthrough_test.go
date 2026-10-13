@@ -3,7 +3,9 @@ package adf
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -174,5 +176,68 @@ func TestPassthroughRejectsInvalidNodes(t *testing.T) {
 	deep := strings.Repeat(`{"type":"panel","content":[`, 120) + strings.Repeat(`]}`, 120)
 	if _, err := FromMarkdown("```adf\n"+deep+"\n```", WithPassthrough()); !errors.Is(err, ErrTooDeep) {
 		t.Errorf("deep node: err = %v, want ErrTooDeep", err)
+	}
+}
+
+// placeholders stands in for nodes by number, as an application keeping
+// node content out of the Markdown would.
+type placeholders struct {
+	nodes []Node
+	reads []bool
+}
+
+func (p *placeholders) Write(n Node) Node {
+	p.nodes = append(p.nodes, n)
+	return Node{Type: "kept", Attrs: map[string]any{"id": json.Number(strconv.Itoa(len(p.nodes) - 1))}}
+}
+
+func (p *placeholders) Read(n Node, inline bool) (Node, error) {
+	p.reads = append(p.reads, inline)
+	if n.Type != "kept" {
+		return Node{}, fmt.Errorf("only placeholders can be written, not %s", n.Type)
+	}
+	i, err := n.Attrs["id"].(json.Number).Int64()
+	if err != nil || i < 0 || int(i) >= len(p.nodes) {
+		return Node{}, errors.New("unknown placeholder")
+	}
+	return p.nodes[i], nil
+}
+
+func TestRawNodesHook(t *testing.T) {
+	t.Parallel()
+	in := passthroughDocs["macros"]
+	h := &placeholders{}
+	md, err := ToMarkdown(in, WithRawNodes(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(md, "toc") || strings.Contains(md, "Diagram") || !strings.Contains(md, `"type":"kept"`) {
+		t.Fatalf("node content in the Markdown:\n%s", md)
+	}
+	out, err := FromMarkdown(md, WithRawNodes(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(normalized(t, in), normalized(t, out)) {
+		t.Errorf("document changed\nin:  %s\nmd:\n%s\nout: %s", in, md, out)
+	}
+	if !reflect.DeepEqual(h.reads, []bool{true, false, false, false}) {
+		t.Errorf("reads = %v", h.reads)
+	}
+	// Inline code in a span with a node is not passed to the hook.
+	h2 := &placeholders{}
+	md, _ = ToMarkdown(adfDoc(para(statusNode, marked("code", `{"type":"code"}`))), WithRawNodes(h2))
+	if len(h2.nodes) != 1 || !strings.Contains(md, `{"type":"text","text":"code","marks":[{"type":"code"}]}`) {
+		t.Errorf("span: %v\n%s", h2.nodes, md)
+	}
+	if _, err := FromMarkdown(md, WithRawNodes(h2)); err != nil {
+		t.Error(err)
+	}
+	// What the hook refuses fails the conversion.
+	if _, err := FromMarkdown("```adf\n"+tocMacro+"\n```", WithRawNodes(h)); err == nil || !strings.Contains(err.Error(), "only placeholders") {
+		t.Errorf("err = %v", err)
+	}
+	if _, err := FromMarkdown("a `adf:"+statusNode+"`", WithRawNodes(h)); err == nil {
+		t.Error("inline node accepted")
 	}
 }

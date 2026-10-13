@@ -145,6 +145,9 @@ func (c *converter) block(n ast.Node) []Node {
 		}
 		if c.isRaw(n) {
 			node, err := parseRaw(c.lines(n), false)
+			if err == nil && c.cfg.rawNodes != nil {
+				node, err = c.cfg.rawNodes.Read(node, false)
+			}
 			if err != nil {
 				c.fail(err)
 				return nil
@@ -313,6 +316,11 @@ func (c *converter) inlines(parent ast.Node, marks []Mark) []Node {
 			code := strings.ReplaceAll(b.String(), "\n", " ")
 			if c.cfg.passthrough && strings.HasPrefix(code, rawPrefix) {
 				nodes, err := parseSpan(code[len(rawPrefix):])
+				for i := range nodes {
+					if err == nil && c.cfg.rawNodes != nil && !plainInline(nodes[i], c.cfg.extended) {
+						nodes[i], err = c.cfg.rawNodes.Read(nodes[i], true)
+					}
+				}
 				if err != nil {
 					c.fail(err)
 					continue

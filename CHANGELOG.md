@@ -6,8 +6,9 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ### Added
 
-- `WithExtendedSyntax` adds Markdown forms for expands (`<details>`), column layouts (a `columns` block of `column` blocks), smart links (`<card:…>`, `<card-block:…>`, `<card-embed:…>`), text color and highlight (`{color:#RRGGBB}…{/color}`, `{highlight:#RRGGBB}…{/highlight}`), the width setting of expands and layouts, and images on a line of their own, with `WithMediaResolver` for attachments. New errors `ErrSyntax` and `*MediaError`.
 - `WithPassthrough` keeps what Markdown cannot express, such as app macros (`extension`, `bodiedExtension`, `inlineExtension`), panels, layouts, status lozenges and colored text: `ToMarkdown` writes them as their JSON in fenced `adf` blocks and `adf:` inline code, and `FromMarkdown` reads them back unchanged, failing with the new `ErrRawNode` for invalid ones.
+- `WithRawNodes` lets an application write placeholders for the nodes `WithPassthrough` would write as JSON and put the nodes back, or refuse others, when reading.
+- `WithExtendedSyntax` adds Markdown forms for expands (`<details>`), column layouts (a `columns` block of `column` blocks), smart links (`<card:…>`, `<card-block:…>`, `<card-embed:…>`), text color and highlight (`{color:#RRGGBB}…{/color}`, `{highlight:#RRGGBB}…{/highlight}`), the width setting of expands and layouts, and images on a line of their own, with `WithMediaResolver` for attachments. New errors `ErrSyntax` and `*MediaError`.
 
 ### Changed
 

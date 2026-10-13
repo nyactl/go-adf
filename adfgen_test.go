@@ -262,6 +262,19 @@ func FuzzPassthroughRoundTrip(f *testing.F) {
 		if md1 != md2 {
 			t.Fatalf("not stable\nadf: %s\nfirst: %q\nsecond: %q", raw, md1, md2)
 		}
+		// Placeholders from WithRawNodes give the same document.
+		h := &placeholders{}
+		mdH, err := ToMarkdown(raw, append(opts, WithRawNodes(h))...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		docH, err := FromMarkdown(mdH, append(back, WithRawNodes(h))...)
+		if err != nil {
+			t.Fatalf("reading back with placeholders %q: %v", mdH, err)
+		}
+		if !reflect.DeepEqual(normalized(t, doc), normalized(t, docH)) {
+			t.Fatalf("placeholders changed the document\nwithout: %s\nwith:    %s", doc, docH)
+		}
 	})
 }
 
@@ -317,6 +330,20 @@ func FuzzExtendedRoundTrip(f *testing.F) {
 		}
 		if md1 != md2 {
 			t.Fatalf("not stable\nadf: %s\nfirst: %q\nsecond: %q", in, md1, md2)
+		}
+		if raw {
+			h := &placeholders{}
+			mdH, err := ToMarkdown(in, append(opts, WithRawNodes(h))...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			docH, err := FromMarkdown(mdH, append(back, WithRawNodes(h))...)
+			if err != nil {
+				t.Fatalf("reading back with placeholders %q: %v", mdH, err)
+			}
+			if !reflect.DeepEqual(normalized(t, doc), normalized(t, docH)) {
+				t.Fatalf("placeholders changed the document\nwithout: %s\nwith:    %s", doc, docH)
+			}
 		}
 	})
 }
