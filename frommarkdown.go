@@ -59,14 +59,17 @@ type converter struct {
 	src []byte
 	cfg *config
 	err error
+	// depth counts the Markdown documents nested in columns blocks, and
+	// inExpand the expands around the current block.
+	depth, inExpand int
 }
 
 // Children allowed by the ADF schema in containers that are stricter than
 // the document root, limited to the node types this converter produces.
 // Table cells only ever get a paragraph, which every container accepts.
 var (
-	listItemChildren   = set("paragraph", "bulletList", "orderedList", "codeBlock")
-	blockquoteChildren = set("paragraph", "bulletList", "orderedList", "codeBlock")
+	listItemChildren   = set("paragraph", "bulletList", "orderedList", "codeBlock", "mediaSingle")
+	blockquoteChildren = set("paragraph", "bulletList", "orderedList", "codeBlock", "mediaSingle")
 )
 
 func set(types ...string) map[string]bool {
@@ -80,9 +83,20 @@ func set(types ...string) map[string]bool {
 // children converts the block children of n. allowed restricts the node
 // types to those the containing ADF node accepts; nil means any.
 func (c *converter) children(n ast.Node, allowed map[string]bool) []Node {
+	return c.siblings(n.FirstChild(), nil, allowed)
+}
+
+// siblings converts the blocks from first up to stop; nil means to the end.
+func (c *converter) siblings(first, stop ast.Node, allowed map[string]bool) []Node {
 	var out []Node
-	for ch := n.FirstChild(); ch != nil; ch = ch.NextSibling() {
-		nodes := c.block(ch)
+	for ch := first; ch != nil && ch != stop; ch = ch.NextSibling() {
+		var nodes []Node
+		if end := c.expandEnd(ch, stop); end != nil {
+			nodes = c.expandNode(ch, end, allowed == nil)
+			ch = end
+		} else {
+			nodes = c.block(ch)
+		}
 		// A passed-through node is kept where its author put it.
 		if allowed != nil && !c.isRaw(ch) {
 			nodes = fit(nodes, allowed)
@@ -90,6 +104,15 @@ func (c *converter) children(n ast.Node, allowed map[string]bool) []Node {
 		out = append(out, nodes...)
 	}
 	return out
+}
+
+// expandEnd returns the end of an expand starting at n, or nil.
+func (c *converter) expandEnd(n, stop ast.Node) ast.Node {
+	h, ok := n.(*ast.HTMLBlock)
+	if !ok || !c.cfg.extended || !detailsOpenRe.MatchString(c.htmlText(h)) {
+		return nil
+	}
+	return c.detailsEnd(n, stop)
 }
 
 // isRaw reports whether n is an adf block read with WithPassthrough.
@@ -101,12 +124,25 @@ func (c *converter) isRaw(n ast.Node) bool {
 func (c *converter) block(n ast.Node) []Node {
 	switch n := n.(type) {
 	case *ast.Paragraph, *ast.TextBlock:
+		if c.cfg.extended {
+			if nodes, ok := c.cardParagraph(n); ok {
+				return nodes
+			}
+			if nodes, ok := c.imageParagraph(n); ok {
+				return nodes
+			}
+		}
 		return []Node{{Type: "paragraph", Content: c.inlineBlock(n)}}
 	case *ast.Heading:
 		return []Node{{Type: "heading", Attrs: map[string]any{"level": n.Level}, Content: c.inlineBlock(n)}}
 	case *ast.ThematicBreak:
 		return []Node{{Type: "rule"}}
 	case *ast.FencedCodeBlock:
+		if c.cfg.extended && string(n.Language(c.src)) == "columns" {
+			if nodes := c.columnsNode(n); nodes != nil || c.err != nil {
+				return nodes
+			}
+		}
 		if c.isRaw(n) {
 			node, err := parseRaw(c.lines(n), false)
 			if err != nil {
@@ -189,10 +225,19 @@ func fit(nodes []Node, allowed map[string]bool) []Node {
 						inline = append(inline, b.Content...)
 					}
 				}
-				out = append(out, Node{Type: "paragraph", Content: mergeText(inline)})
+				out = append(out, Node{Type: "paragraph", Content: mergeText(inline, false)})
 			}
 		case "rule":
 			out = append(out, Node{Type: "paragraph", Content: textNodes("---", nil)})
+		case "expand", "nestedExpand":
+			out = append(out, fit(n.Content, allowed)...)
+		case "layoutSection":
+			for _, col := range n.Content {
+				out = append(out, fit(col.Content, allowed)...)
+			}
+		case "blockCard", "embedCard":
+			url := strAttr(n.Attrs, "url")
+			out = append(out, Node{Type: "paragraph", Content: textNodes(url, []Mark{linkMark(url)})})
 		default:
 			out = append(out, Node{Type: "paragraph", Content: textNodes(plainText(n.Content), nil)})
 		}
@@ -229,7 +274,10 @@ func codeBlock(code string) Node {
 // inlineBlock converts the inline children of a block and resolves mentions.
 func (c *converter) inlineBlock(n ast.Node) []Node {
 	nodes := c.inlines(n, nil)
-	nodes = mergeText(nodes)
+	if c.cfg.extended {
+		nodes = applyColors(nodes)
+	}
+	nodes = mergeText(nodes, c.cfg.extended)
 	nodes = c.mentions(nodes)
 	for len(nodes) > 0 && nodes[len(nodes)-1].Type == "hardBreak" {
 		nodes = nodes[:len(nodes)-1]
@@ -245,7 +293,11 @@ func (c *converter) inlines(parent ast.Node, marks []Mark) []Node {
 	for n := parent.FirstChild(); n != nil; n = n.NextSibling() {
 		switch n := n.(type) {
 		case *ast.Text:
-			out = append(out, textNodes(literal(n.Value(c.src)), marks)...)
+			if c.cfg.extended {
+				out = append(out, colorTokens(n.Value(c.src), marks)...)
+			} else {
+				out = append(out, textNodes(literal(n.Value(c.src)), marks)...)
+			}
 			if n.SoftLineBreak() || n.HardLineBreak() {
 				out = append(out, Node{Type: "hardBreak"})
 			}
@@ -292,6 +344,10 @@ func (c *converter) inlines(parent ast.Node, marks []Mark) []Node {
 			out = append(out, c.inlines(n, addMark(marks, linkMark(literal(n.Destination))))...)
 		case *ast.AutoLink:
 			url := string(n.URL(c.src))
+			if rest, ok := strings.CutPrefix(url, cardInline); ok && c.cfg.extended && rest != "" {
+				out = append(out, Node{Type: "inlineCard", Attrs: map[string]any{"url": rest}})
+				continue
+			}
 			out = append(out, textNodes(string(n.Label(c.src)), addMark(marks, linkMark(url)))...)
 		case *ast.Image:
 			alt := c.inlines(n, addMark(marks, linkMark(literal(n.Destination))))
@@ -338,7 +394,7 @@ func (c *converter) mentions(nodes []Node) []Node {
 	}
 	var out []Node
 	for _, n := range nodes {
-		if n.Type != "text" || hasMark(n.Marks, "code") || !plainInline(n) || !strings.Contains(n.Text, "@[") {
+		if n.Type != "text" || hasMark(n.Marks, "code") || !plainInline(n, c.cfg.extended) || !strings.Contains(n.Text, "@[") {
 			out = append(out, n)
 			continue
 		}
@@ -399,11 +455,13 @@ func textNodes(s string, marks []Mark) []Node {
 	return []Node{{Type: "text", Text: s, Marks: append([]Mark(nil), marks...)}}
 }
 
-func mergeText(nodes []Node) []Node {
+// mergeText joins neighbouring text with the same marks. ext tells whether
+// WithExtendedSyntax is on.
+func mergeText(nodes []Node, ext bool) []Node {
 	var out []Node
 	for _, n := range nodes {
 		// Text that WithPassthrough writes as JSON stays as it came.
-		if last := len(out) - 1; last >= 0 && n.Type == "text" && out[last].Type == "text" && plainInline(n) && plainInline(out[last]) && reflect.DeepEqual(out[last].Marks, n.Marks) {
+		if last := len(out) - 1; last >= 0 && n.Type == "text" && out[last].Type == "text" && plainInline(n, ext) && plainInline(out[last], ext) && reflect.DeepEqual(out[last].Marks, n.Marks) {
 			out[last].Text += n.Text
 			continue
 		}
@@ -414,7 +472,7 @@ func mergeText(nodes []Node) []Node {
 
 // markOrder is the canonical order of marks on a text node, so equal
 // formatting always compares equal.
-var markOrder = map[string]int{"link": 0, "em": 1, "strong": 2, "strike": 3, "code": 4}
+var markOrder = map[string]int{"link": 0, "em": 1, "strong": 2, "strike": 3, "code": 4, "textColor": 5, "backgroundColor": 6}
 
 func addMark(marks []Mark, m Mark) []Mark {
 	if hasMark(marks, m.Type) {

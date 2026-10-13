@@ -39,6 +39,21 @@ const DefaultMaxDepth = 100
 // ErrTooDeep is returned for documents nested deeper than the limit.
 var ErrTooDeep = errors.New("adf: document is nested too deeply")
 
+// ErrSyntax is returned by FromMarkdown, with WithExtendedSyntax, for a
+// columns block whose column blocks are not as described there.
+var ErrSyntax = errors.New("adf: invalid extended syntax")
+
+// MediaError is returned by FromMarkdown when an image refers to an
+// attachment that the media resolver does not know, or when there is no
+// resolver.
+type MediaError struct {
+	Name string
+}
+
+func (e *MediaError) Error() string {
+	return fmt.Sprintf("adf: cannot resolve attachment %q", e.Name)
+}
+
 // ErrRawNode is returned by FromMarkdown, with WithPassthrough, for an adf
 // block or span that does not hold one valid node for its place.
 var ErrRawNode = errors.New("adf: invalid adf block")
@@ -62,6 +77,8 @@ type config struct {
 	resolveMention func(label string) (accountID, text string, ok bool)
 	maxDepth       int
 	passthrough    bool
+	extended       bool
+	resolveMedia   func(name string) (media Node, ok bool)
 }
 
 func newConfig(opts []Option) *config {
@@ -103,6 +120,41 @@ func WithMentionResolver(f func(label string) (accountID, text string, ok bool))
 // accept: the option lets the author write any node.
 func WithPassthrough() Option {
 	return func(c *config) { c.passthrough = true }
+}
+
+// WithExtendedSyntax adds Markdown forms for elements of the Confluence and
+// Jira editors that CommonMark lacks. Both directions use them:
+//
+//   - expand: <details>, an optional <summary>Title</summary> line and the
+//     body, closed by </details>; inside an expand it is a nestedExpand. The
+//     editor's width setting is kept as data-breakout="wide:760".
+//   - column layout: a fenced block with the info string columns holding one
+//     fenced block per column with the info string column and its width in
+//     percent, e.g. "column 50"; the width setting as in breakout=wide:760.
+//   - smart links: <card:URL> inline, <card-block:URL> and <card-embed:URL>
+//     on a line of their own.
+//   - text color and highlight: {color:#RRGGBB}text{/color} and
+//     {highlight:#RRGGBB}text{/highlight}.
+//   - images on a line of their own: ![alt](https://...) for external images,
+//     and ![name](attachment:name) for attachments, with WithMediaResolver.
+//     The title can hold the layout and the width: "center 600px" or "wide 50%".
+//
+// Text that only looks like one of these forms is escaped, and code in the
+// language columns loses that language, which would make it a layout (with
+// WithPassthrough it is kept). A columns block with malformed column blocks
+// makes FromMarkdown fail with ErrSyntax; one without any column block is
+// code, and an image with a title other than these options stays a link.
+func WithExtendedSyntax() Option {
+	return func(c *config) { c.extended = true }
+}
+
+// WithMediaResolver lets WithExtendedSyntax write images stored as
+// attachments. ToMarkdown names such an image by its alt text, usually the
+// file name, and FromMarkdown asks the resolver for the media node of that
+// name; when it reports false, FromMarkdown fails with a *MediaError.
+// Without a resolver, ToMarkdown keeps writing attachments as before.
+func WithMediaResolver(f func(name string) (media Node, ok bool)) Option {
+	return func(c *config) { c.resolveMedia = f }
 }
 
 // WithMaxDepth sets the nesting limit for both directions.

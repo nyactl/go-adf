@@ -44,7 +44,7 @@ func ToMarkdown(raw json.RawMessage, opts ...Option) (string, error) {
 	if mention == nil {
 		mention = func(_, text string) string { return strings.TrimPrefix(text, "@") }
 	}
-	r := renderer{mention: mention, raw: cfg.passthrough}
+	r := renderer{mention: mention, raw: cfg.passthrough, ext: cfg.extended, media: cfg.resolveMedia != nil}
 	return strings.TrimSpace(r.blocks(doc.Content)), nil
 }
 
@@ -61,13 +61,28 @@ type renderer struct {
 	// allowed are the block types the container accepts when reading back;
 	// nil means any.
 	allowed map[string]bool
+	// ext writes the forms of WithExtendedSyntax; media also attachments.
+	ext, media bool
+	// nested is set below the top level of the document, inExpand inside
+	// an expand.
+	nested, inExpand bool
+}
+
+// plainBlock is plainBlock with the forms the renderer writes.
+func (r renderer) plainBlock(n Node) bool {
+	if r.ext && n.Type == "codeBlock" {
+		if lang := strings.Fields(strAttr(n.Attrs, "language")); len(lang) > 0 && lang[0] == "columns" {
+			return false
+		}
+	}
+	return plainBlock(n) || (r.ext && r.extBlock(n))
 }
 
 func (r renderer) blocks(nodes []Node) string {
 	parts := make([]string, 0, len(nodes))
 	prev, prevAlt := "", false
 	for _, n := range nodes {
-		if r.raw && (!plainBlock(n) || (r.allowed != nil && !r.allowed[n.Type])) {
+		if r.raw && (!r.plainBlock(n) || (r.allowed != nil && !r.allowed[n.Type])) {
 			parts = append(parts, rawBlock(n))
 			prev, prevAlt = n.Type, false
 			continue
@@ -85,6 +100,28 @@ func (r renderer) blocks(nodes []Node) string {
 }
 
 func (r renderer) block(n Node) string {
+	if r.ext {
+		switch n.Type {
+		case "expand", "nestedExpand":
+			return r.expand(n)
+		case "layoutSection":
+			if !r.nested {
+				return r.columns(n)
+			}
+		case "blockCard":
+			if cardNode(n, cardBlock) {
+				return "<" + cardBlock + strAttr(n.Attrs, "url") + ">"
+			}
+		case "embedCard":
+			if cardNode(n, cardEmbed, "layout", "width", "originalWidth", "originalHeight") {
+				return "<" + cardEmbed + strAttr(n.Attrs, "url") + ">"
+			}
+		case "mediaSingle":
+			if s, ok := r.image(n); ok {
+				return s
+			}
+		}
+	}
 	switch n.Type {
 	case "paragraph":
 		return r.inline(n.Content)
@@ -140,22 +177,20 @@ func (r renderer) block(n Node) string {
 		fence := codeFence(code)
 		lang := strings.Fields(strings.ReplaceAll(strAttr(n.Attrs, "language"), "`", ""))
 		info := ""
-		if len(lang) > 0 {
+		// With WithExtendedSyntax, code in the language columns would read
+		// as a layout.
+		if len(lang) > 0 && (!r.ext || lang[0] != "columns") {
 			info = lang[0]
 		}
 		return fence + info + "\n" + code + "\n" + fence
 	case "blockquote":
-		if r.raw {
-			r.allowed = blockquoteChildren
-			return quote(r.blocks(n.Content))
-		}
-		return quote(r.blocks(fitMarkdown(n.Content, blockquoteChildren)))
+		return quote(r.container(n.Content, blockquoteChildren))
 	case "panel":
 		label := strAttr(n.Attrs, "panelType")
 		if label == "" {
 			label = "note"
 		}
-		return quote("**" + strings.ToUpper(label[:1]) + label[1:] + ":** " + r.blocks(fitMarkdown(n.Content, blockquoteChildren)))
+		return quote("**" + strings.ToUpper(label[:1]) + label[1:] + ":** " + r.container(n.Content, blockquoteChildren))
 	case "rule":
 		return "---"
 	case "table":
@@ -202,14 +237,7 @@ func (r renderer) list(items []Node, marker func(int) string) string {
 			lines = append(lines, marker(i)+r.block(item))
 			continue
 		}
-		var body string
-		if r.raw {
-			rr := r
-			rr.allowed = listItemChildren
-			body = rr.blocks(item.Content)
-		} else {
-			body = r.blocks(fitMarkdown(item.Content, listItemChildren))
-		}
+		body := r.container(item.Content, listItemChildren)
 		// Markdown cannot hold an empty item stably: depending on what
 		// follows, it ends the list.
 		if strings.TrimSpace(body) == "" {
@@ -239,7 +267,7 @@ func (r renderer) table(n Node) string {
 		var cells []string
 		for _, cell := range row.Content {
 			cr := r
-			cr.inTable = true
+			cr.inTable, cr.nested = true, true
 			text := strings.ReplaceAll(cr.blocks(cell.Content), "\n\n", "<br>")
 			cells = append(cells, strings.ReplaceAll(text, "\n", "<br>"))
 		}
@@ -278,10 +306,10 @@ func (r renderer) table(n Node) string {
 // left out rather than written in a way that reads back differently.
 func (r renderer) inline(nodes []Node) string {
 	s := r.writeInline(nodes)
-	if r.noVerify || !hasEmphasis(nodes) || stable(s, r.raw) {
+	if r.noVerify || !hasEmphasis(nodes) || stable(s, r.raw, r.ext) {
 		return s
 	}
-	return r.writeInline(withoutEmphasis(nodes, r.raw))
+	return r.writeInline(withoutEmphasis(nodes, r.raw, r.ext))
 }
 
 func hasEmphasis(nodes []Node) bool {
@@ -296,10 +324,10 @@ func hasEmphasis(nodes []Node) bool {
 }
 
 // withoutEmphasis drops emphasis, except from nodes written as JSON (raw).
-func withoutEmphasis(nodes []Node, raw bool) []Node {
+func withoutEmphasis(nodes []Node, raw, ext bool) []Node {
 	out := make([]Node, len(nodes))
 	for i, n := range nodes {
-		if raw && !plainInline(n) {
+		if raw && !plainInline(n, ext) {
 			out[i] = n
 			continue
 		}
@@ -316,10 +344,13 @@ func withoutEmphasis(nodes []Node, raw bool) []Node {
 }
 
 // stable reports whether s reads back as itself.
-func stable(s string, raw bool) bool {
+func stable(s string, raw, ext bool) bool {
 	var opts []Option
 	if raw {
 		opts = append(opts, WithPassthrough())
+	}
+	if ext {
+		opts = append(opts, WithExtendedSyntax())
 	}
 	doc, err := FromMarkdown(s, opts...)
 	if err != nil {
@@ -329,19 +360,24 @@ func stable(s string, raw bool) bool {
 	if err := json.Unmarshal(doc, &root); err != nil {
 		return false
 	}
-	r := renderer{mention: func(_, text string) string { return text }, noVerify: true, raw: raw}
+	r := renderer{mention: func(_, text string) string { return text }, noVerify: true, raw: raw, ext: ext}
 	return strings.TrimSpace(r.blocks(root.Content)) == s
 }
 
 func (r renderer) writeInline(nodes []Node) string {
 	nodes = r.normalizeInline(nodes)
+	if r.ext {
+		if s, ok := r.colored(nodes); ok {
+			return s
+		}
+	}
 	w := &inlineWriter{atStart: true}
 	for i := 0; i < len(nodes); i++ {
 		n := nodes[i]
-		if r.raw && spanMember(n) {
+		if r.raw && spanMember(n, r.ext) {
 			j, hasRaw := i, false
-			for ; j < len(nodes) && spanMember(nodes[j]); j++ {
-				hasRaw = hasRaw || !plainInline(nodes[j])
+			for ; j < len(nodes) && spanMember(nodes[j], r.ext); j++ {
+				hasRaw = hasRaw || !plainInline(nodes[j], r.ext)
 			}
 			if hasRaw {
 				span := rawSpan(nodes[i:j])
@@ -389,6 +425,9 @@ func (r renderer) leafText(n Node) string {
 		}
 		return strAttr(n.Attrs, "shortName")
 	case "inlineCard":
+		if r.ext && cardNode(n, cardInline) {
+			return "<" + cardInline + strAttr(n.Attrs, "url") + ">"
+		}
 		if u := strAttr(n.Attrs, "url"); u != "" {
 			return "<" + u + ">"
 		}
@@ -415,7 +454,7 @@ func (r renderer) normalizeInline(nodes []Node) []Node {
 	var out []Node
 	for _, n := range nodes {
 		switch {
-		case r.raw && !plainInline(n) && (n.Type != "text" || n.Text != ""):
+		case r.raw && !plainInline(n, r.ext) && (n.Type != "text" || n.Text != ""):
 		case n.Type == "text":
 			if n.Text == "" {
 				continue
@@ -462,7 +501,7 @@ func (r renderer) normalizeInline(nodes []Node) []Node {
 		}
 		kept = append(kept, n)
 	}
-	return mergeText(kept)
+	return mergeText(kept, r.ext)
 }
 
 var knownInline = map[string]bool{"text": true, "hardBreak": true, "mention": true, "emoji": true, "inlineCard": true, "date": true, "status": true, "placeholder": true}
@@ -523,10 +562,16 @@ func runOf(next []Node, mark string) (run int, wordAfter bool) {
 	return run, true
 }
 
+// cardLink reports whether a link target would read as a card in an
+// autolink.
+func cardLink(href string) bool {
+	return strings.HasPrefix(href, cardInline) || strings.HasPrefix(href, cardBlock) || strings.HasPrefix(href, cardEmbed)
+}
+
 // linkOf is linkOf for what the renderer writes as Markdown: with raw, text
 // written as JSON keeps its link there.
 func (r renderer) linkOf(n Node) (string, bool) {
-	if r.raw && !plainInline(n) {
+	if r.raw && !plainInline(n, r.ext) {
 		return "", false
 	}
 	return linkOf(n)
@@ -546,7 +591,7 @@ func linkOf(n Node) (string, bool) {
 
 // link writes text nodes that share a link target.
 func (r renderer) link(nodes []Node, href string) string {
-	if len(nodes) == 1 && len(nodes[0].Marks) == 1 && nodes[0].Text == href && isAutolink(href) {
+	if len(nodes) == 1 && len(nodes[0].Marks) == 1 && nodes[0].Text == href && isAutolink(href) && !cardLink(href) {
 		return "<" + href + ">"
 	}
 	w := &inlineWriter{}
@@ -816,11 +861,19 @@ func tooDeep(n Node, limit int) bool {
 func fitMarkdown(nodes []Node, allowed map[string]bool) []Node {
 	var out []Node
 	for _, n := range nodes {
+		if allowed[n.Type] {
+			out = append(out, n)
+			continue
+		}
 		switch n.Type {
-		case "heading", "blockquote", "table", "rule":
+		case "heading", "blockquote", "table", "rule", "blockCard", "embedCard":
 			out = append(out, fit([]Node{n}, allowed)...)
 		case "panel", "expand", "nestedExpand":
 			out = append(out, fitMarkdown(n.Content, allowed)...)
+		case "layoutSection":
+			for _, col := range n.Content {
+				out = append(out, fitMarkdown(col.Content, allowed)...)
+			}
 		default:
 			out = append(out, n)
 		}

@@ -77,3 +77,14 @@ func Example_passthrough() {
 	// ```
 	// {"type":"doc","version":1,"content":[{"type":"paragraph","content":[{"type":"text","text":"On this page:"}]},{"type":"extension","attrs":{"extensionKey":"toc","extensionType":"com.atlassian.confluence.macro.core"}}]}
 }
+
+func Example_extendedSyntax() {
+	md := "<details>\n<summary>Details</summary>\n\nSee <card:https://example.atlassian.net/browse/PROJ-1>, {color:#006644}done{/color}.\n\n</details>"
+	doc, _ := adf.FromMarkdown(md, adf.WithExtendedSyntax())
+	fmt.Println(string(doc))
+	back, _ := adf.ToMarkdown(doc, adf.WithExtendedSyntax())
+	fmt.Println(back == md)
+	// Output:
+	// {"type":"doc","version":1,"content":[{"type":"expand","attrs":{"title":"Details"},"content":[{"type":"paragraph","content":[{"type":"text","text":"See "},{"type":"inlineCard","attrs":{"url":"https://example.atlassian.net/browse/PROJ-1"}},{"type":"text","text":", "},{"type":"text","text":"done","marks":[{"type":"textColor","attrs":{"color":"#006644"}}]},{"type":"text","text":"."}]}]}]}
+	// true
+}
